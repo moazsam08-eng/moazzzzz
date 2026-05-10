@@ -1,0 +1,109 @@
+<%- include('partials/header', { title: 'نظام التذاكر' }) %>
+
+<div class="container-fluid px-4 py-4">
+  <div class="d-flex align-items-center mb-4">
+    <h2 class="mb-0">🎫 نظام التذاكر</h2>
+  </div>
+
+  <!-- Stats -->
+  <div class="row g-3 mb-4">
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h3 class="text-primary"><%= stats.total %></h3>
+          <p class="mb-0 text-muted">إجمالي التذاكر</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h3 class="text-success"><%= stats.open %></h3>
+          <p class="mb-0 text-muted">مفتوحة</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card text-center">
+        <div class="card-body">
+          <h3 class="text-danger"><%= stats.closed %></h3>
+          <p class="mb-0 text-muted">مغلقة</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sections -->
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">أقسام التذاكر</h5>
+    </div>
+    <div class="card-body">
+      <% if (config && config.sections && config.sections.length > 0) { %>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle">
+            <thead><tr>
+              <th>القسم</th><th>الكاتيجوري</th><th>رول الستاف</th><th>قناة اللوق</th><th>الحالة</th>
+            </tr></thead>
+            <tbody>
+              <% config.sections.forEach(s => { %>
+              <tr>
+                <td><%= s.emoji %> <%= s.name %></td>
+                <td><code><%= s.categoryId %></code></td>
+                <td><code><%= s.supportRoleId %></code></td>
+                <td><code><%= s.logChannelId %></code></td>
+                <td>
+                  <% if (s.enabled) { %>
+                    <span class="badge bg-success">مفعّل</span>
+                  <% } else { %>
+                    <span class="badge bg-secondary">معطّل</span>
+                  <% } %>
+                </td>
+              </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      <% } else { %>
+        <p class="text-muted text-center py-3">لا توجد أقسام. استخدم <code>/ticket-setup</code> في الديسكورد.</p>
+      <% } %>
+    </div>
+  </div>
+
+  <!-- Recent Tickets -->
+  <div class="card">
+    <div class="card-header"><h5 class="mb-0">آخر التذاكر</h5></div>
+    <div class="card-body">
+      <% if (tickets && tickets.length > 0) { %>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle">
+            <thead><tr>
+              <th>#</th><th>المالك</th><th>القسم</th><th>الحالة</th><th>التاريخ</th>
+            </tr></thead>
+            <tbody>
+              <% tickets.forEach(t => { %>
+              <tr>
+                <td><%= t.number.toString().padStart(4,'0') %></td>
+                <td><%= t.ownerTag %></td>
+                <td><%= t.sectionName %></td>
+                <td>
+                  <% if (t.status === 'open') { %>
+                    <span class="badge bg-success">مفتوحة</span>
+                  <% } else { %>
+                    <span class="badge bg-danger">مغلقة</span>
+                  <% } %>
+                </td>
+                <td><%= new Date(t.createdAt).toLocaleDateString('ar-EG') %></td>
+              </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+      <% } else { %>
+        <p class="text-muted text-center py-3">لا توجد تذاكر بعد.</p>
+      <% } %>
+    </div>
+  </div>
+</div>
+
+<%- include('partials/footer') %>
