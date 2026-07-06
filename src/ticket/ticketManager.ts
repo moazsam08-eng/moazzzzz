@@ -1,274 +1,524 @@
-import {
-  ButtonInteraction, StringSelectMenuInteraction, ModalSubmitInteraction,
-  ModalBuilder, TextInputBuilder, TextInputStyle,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  EmbedBuilder, AttachmentBuilder, TextChannel,
-  OverwriteType, Colors, PermissionFlagsBits,
-  StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
-  ComponentType,
+import { 
+    TextChannel, 
+    EmbedBuilder, 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle,
+    ButtonInteraction,
+    ChannelType,
+    GuildMember,
+    StringSelectMenuInteraction
 } from 'discord.js';
-import { TicketConfig } from '../models/TicketConfig';
-import { Ticket }       from '../models/Ticket';
-import { generateTranscript } from '../utils/transcript';
+import { ModBot } from '../types/ModBot';
+import { Ticket } from '../models/Ticket';
+import { createTranscript } from './transcriptGenerator';
+import { TicketSection } from '../types/TicketSection';
 
-// ── فتح التذكرة (من الزر أو المنيو)
-export async function handleOpen(
-  interaction: ButtonInteraction | StringSelectMenuInteraction,
-  sectionName: string
-): Promise<void> {
-  const cfg = await TicketConfig.findOne({ guildId: interaction.guildId! });
-  const section = cfg?.sections.find(s => s.name.toLowerCase().replace(/\s+/g,'_') === sectionName);
-  if (!cfg || !section) { await interaction.reply({ content: '❌ القسم غير موجود.', ephemeral: true }); return; }
-
-  // تذكرة مفتوحة موجودة؟
-  const existing = await Ticket.findOne({ guildId: interaction.guildId!, ownerId: interaction.user.id, status: 'open' });
-  if (existing) { await interaction.reply({ content: `❌ عندك تذكرة مفتوحة: <#${existing.channelId}>`, ephemeral: true }); return; }
-
-  // سبب؟
-  if (section.reasonEnabled) {
-    const modal = new ModalBuilder().setCustomId(`tkt_modal_${sectionName}`).setTitle(`${section.emoji} ${section.name}`);
-    modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(
-      new TextInputBuilder().setCustomId('reason').setLabel('سبب فتح التذكرة').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500)
-    ));
-    await interaction.showModal(modal);
-    return;
-  }
-
-  await interaction.deferReply({ ephemeral: true });
-  await createChannel(interaction, section, cfg, undefined);
+interface TicketData {
+    id: string;
+    guildId: string;
+    channelId: string;
+    userId: string;
+    section: string;
+    status: 'open' | 'claimed' | 'closed';
+    claimedBy?: string;
+    claimedAt?: Date;
+    closedBy?: string;
+    closedAt?: Date;
+    createdAt: Date;
 }
 
-// ── Modal submit (سبب)
-export async function handleModal(interaction: ModalSubmitInteraction, sectionName: string): Promise<void> {
-  await interaction.deferReply({ ephemeral: true });
-  const cfg     = await TicketConfig.findOne({ guildId: interaction.guildId! });
-  const section = cfg?.sections.find(s => s.name.toLowerCase().replace(/\s+/g,'_') === sectionName);
-  if (!cfg || !section) { await interaction.editReply({ content: '❌ القسم غير موجود.' }); return; }
-  const reason = interaction.fields.getTextInputValue('reason');
-  await createChannel(interaction, section, cfg, reason);
-}
+export class TicketManager {
+    constructor(private client: ModBot) {}
 
-// ── إنشاء القناة
-async function createChannel(
-  interaction: ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction,
-  section: any, cfg: any, reason?: string
-): Promise<void> {
-  const guild = interaction.guild!;
-  const count = await Ticket.countDocuments({ guildId: guild.id }) + 1;
-  const chName = `${section.emoji.replace(/\s/g,'')}-${interaction.user.username.toLowerCase().slice(0,15)}-${count.toString().padStart(4,'0')}`;
+    public async setupSystem(channel: TextChannel): Promise<void> {
+        try {
+            const settings = this.client.settings.ticket;
+            const locale = this.client.locales.get(this.client.settings.defaultLanguage)?.ticket;
 
-  const channel = await guild.channels.create({
-    name: chName,
-    parent: section.categoryId,
-    permissionOverwrites: [
-      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel], type: OverwriteType.Role },
-      { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles], type: OverwriteType.Member },
-      { id: section.supportRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.AttachFiles], type: OverwriteType.Role },
-    ],
-    topic: `🎫 ${section.name} | ${interaction.user.tag} | #${count.toString().padStart(4,'0')}`,
-  }) as TextChannel;
+            if (!settings.enabled) {
+                throw new Error(locale?.messages?.disabled || 'Ticket system is disabled');
+            }
 
-  await Ticket.create({
-    guildId: guild.id, channelId: channel.id,
-    ownerId: interaction.user.id, ownerTag: interaction.user.tag,
-    sectionName: section.name, reason, status: 'open',
-    createdAt: new Date(), number: count,
-  });
+            const embed = this.createSetupEmbed();
+            const components = this.createTicketComponents();
 
-  // رسالة الترحيب
-  const welcome = new EmbedBuilder()
-    .setColor('#5865F2')
-    .setTitle(`${section.emoji} ${section.name} — #${count.toString().padStart(4,'0')}`)
-    .setDescription(section.welcomeMsg.replace('{user}', `<@${interaction.user.id}>`))
-    .setTimestamp();
-  if (reason) welcome.addFields({ name: '📝 السبب', value: reason });
+            await channel.send({
+                embeds: [embed],
+                components
+            });
 
-  const ctrlRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('tkt_close').setLabel('اغلاق').setEmoji('🔒').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('tkt_claim').setLabel('استلام').setEmoji('✋').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('tkt_owner').setLabel('استدعاء الأونر').setEmoji('🔇').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('tkt_support').setLabel('طلب السبورت').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
-  );
-  const ctrlRow2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('tkt_edit').setLabel('تعديل التذكرة').setEmoji('⚙️').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('tkt_transcript').setLabel('Transcript').setEmoji('📄').setStyle(ButtonStyle.Secondary),
-  );
-
-  await channel.send({
-    content: `<@${interaction.user.id}> <@&${section.supportRoleId}>`,
-    embeds: [welcome],
-    components: [ctrlRow, ctrlRow2],
-  });
-
-  // لوق
-  const logCh = guild.channels.cache.get(section.logChannelId) as TextChannel | undefined;
-  logCh?.send({ embeds: [new EmbedBuilder().setColor(Colors.Green).setTitle('📂 تذكرة جديدة')
-    .addFields(
-      { name: '👤 المالك',  value: `<@${interaction.user.id}>`, inline: true },
-      { name: '🏷️ القسم',  value: section.name,                inline: true },
-      { name: '📁 القناة', value: `<#${channel.id}>`,          inline: true },
-      ...(reason ? [{ name: '📝 السبب', value: reason, inline: false }] : []),
-    ).setTimestamp()] });
-
-  await interaction.editReply({ content: `✅ تم فتح تذكرتك: <#${channel.id}>` });
-}
-
-// ── إغلاق
-export async function handleClose(interaction: ButtonInteraction): Promise<void> {
-  await interaction.deferReply({ ephemeral: false });
-  const channel = interaction.channel as TextChannel;
-  const ticket  = await Ticket.findOne({ channelId: channel.id, status: 'open' });
-  if (!ticket) { await interaction.editReply({ content: '❌ هذه القناة ليست تذكرة مفتوحة.' }); return; }
-
-  const cfg     = await TicketConfig.findOne({ guildId: interaction.guildId! });
-  const section = cfg?.sections.find(s => s.name === ticket.sectionName);
-  const buf     = await generateTranscript(channel, ticket.ownerTag, ticket.sectionName).catch(() => null);
-
-  ticket.status   = 'closed';
-  ticket.closedAt = new Date();
-  ticket.closedBy = interaction.user.tag;
-  await ticket.save();
-
-  if (section?.logChannelId && buf) {
-    const logCh = interaction.guild?.channels.cache.get(section.logChannelId) as TextChannel | undefined;
-    logCh?.send({
-      embeds: [new EmbedBuilder().setColor(Colors.Red).setTitle('🔒 تذكرة مغلقة')
-        .addFields(
-          { name: '📁 القناة',      value: channel.name,           inline: true },
-          { name: '👤 المالك',      value: `<@${ticket.ownerId}>`, inline: true },
-          { name: '🏷️ القسم',      value: ticket.sectionName,     inline: true },
-          { name: '🔒 أغلقها',     value: interaction.user.tag,   inline: true },
-          { name: '🕐 الوقت',      value: `<t:${Math.floor(Date.now()/1000)}:F>`, inline: true },
-        ).setTimestamp()],
-      files: [new AttachmentBuilder(buf, { name: `transcript-${channel.name}.html` })],
-    });
-  }
-
-  await channel.permissionOverwrites.edit(ticket.ownerId, { SendMessages: false }).catch(() => null);
-  await interaction.editReply({ embeds: [new EmbedBuilder().setColor(Colors.Red).setTitle('🔒 تم إغلاق التذكرة')
-    .setDescription(`أُغلقت بواسطة ${interaction.user}\nسيتم حذف القناة خلال **5 ثوانٍ**...`).setTimestamp()] });
-  await new Promise(r => setTimeout(r, 5000));
-  await channel.delete().catch(() => null);
-}
-
-// ── استلام
-export async function handleClaim(interaction: ButtonInteraction): Promise<void> {
-  await interaction.deferReply({ ephemeral: false });
-  const ticket = await Ticket.findOne({ channelId: interaction.channel!.id, status: 'open' });
-  if (!ticket) { await interaction.editReply({ content: '❌ ليست تذكرة مفتوحة.' }); return; }
-  if (ticket.claimedBy) { await interaction.editReply({ content: `❌ مستلمة من <@${ticket.claimedBy}>.` }); return; }
-  ticket.claimedBy = interaction.user.id; await ticket.save();
-  await (interaction.channel as TextChannel).permissionOverwrites.edit(interaction.user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, ManageMessages: true });
-  await interaction.editReply({ embeds: [new EmbedBuilder().setColor(Colors.Yellow).setDescription(`✋ استلم ${interaction.user} هذه التذكرة.`).setTimestamp()] });
-}
-
-// ── استدعاء الأونر
-export async function handleOwner(interaction: ButtonInteraction): Promise<void> {
-  await interaction.deferReply({ ephemeral: false });
-  const ticket = await Ticket.findOne({ channelId: interaction.channel!.id, status: 'open' });
-  if (!ticket) { await interaction.editReply({ content: '❌ ليست تذكرة مفتوحة.' }); return; }
-  await interaction.editReply({ content: `🔇 <@${ticket.ownerId}> تم استدعاؤك للتذكرة!` });
-}
-
-// ── طلب السبورت
-export async function handleSupport(interaction: ButtonInteraction): Promise<void> {
-  await interaction.deferReply({ ephemeral: false });
-  const ticket  = await Ticket.findOne({ channelId: interaction.channel!.id, status: 'open' });
-  const cfg     = await TicketConfig.findOne({ guildId: interaction.guildId! });
-  const section = cfg?.sections.find(s => s.name === ticket?.sectionName);
-  if (!ticket || !section) { await interaction.editReply({ content: '❌ ليست تذكرة مفتوحة.' }); return; }
-  await interaction.editReply({ content: `🔔 <@&${section.supportRoleId}> مطلوب في هذه التذكرة!` });
-}
-
-// ── تعديل التذكرة (قائمة)
-export async function handleEdit(interaction: ButtonInteraction): Promise<void> {
-  await interaction.deferReply({ ephemeral: true });
-  const ticket = await Ticket.findOne({ channelId: interaction.channel!.id, status: 'open' });
-  if (!ticket) { await interaction.editReply({ content: '❌ ليست تذكرة مفتوحة.' }); return; }
-
-  const menu = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-    new StringSelectMenuBuilder().setCustomId('tkt_edit_menu').setPlaceholder('اختر الإجراء')
-      .addOptions(
-        new StringSelectMenuOptionBuilder().setLabel('Come — استدعاء صاحب التذكرة').setEmoji('👤').setValue('come'),
-        new StringSelectMenuOptionBuilder().setLabel('Rename — تغيير اسم التذكرة').setEmoji('✏️').setValue('rename'),
-        new StringSelectMenuOptionBuilder().setLabel('Add User — إضافة عضو').setEmoji('➕').setValue('add'),
-        new StringSelectMenuOptionBuilder().setLabel('Remove User — إزالة عضو').setEmoji('➖').setValue('remove'),
-        new StringSelectMenuOptionBuilder().setLabel('Reset Menu — إعادة تعيين الأزرار').setEmoji('🔄').setValue('reset'),
-      )
-  );
-  await interaction.editReply({ embeds: [new EmbedBuilder().setColor('#5865F2').setTitle('⚙️ تعديل التذكرة')], components: [menu] });
-
-  const reply = await interaction.fetchReply();
-  const col   = reply.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 30_000 });
-  col.once('collect', async sel => {
-    await sel.deferUpdate(); col.stop();
-    const action  = sel.values[0];
-    const channel = interaction.channel as TextChannel;
-
-    if (action === 'come') {
-      await channel.send({ content: `👤 <@${ticket.ownerId}> تم استدعاؤك!` });
-      await interaction.editReply({ content: '✅ تم.', components: [] });
+        } catch (error) {
+            console.error('Error setting up ticket system:', error);
+            throw error;
+        }
     }
 
-    if (action === 'rename') {
-      const modal = new ModalBuilder().setCustomId('tkt_rename').setTitle('تغيير اسم التذكرة');
-      modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder().setCustomId('newname').setLabel('الاسم الجديد').setStyle(TextInputStyle.Short).setRequired(true)
-      ));
-      await sel.showModal(modal).catch(()=>null);
-      const submitted = await sel.awaitModalSubmit({ time: 60_000 }).catch(() => null);
-      if (submitted) {
-        await submitted.deferUpdate();
-        await channel.setName(submitted.fields.getTextInputValue('newname')).catch(() => null);
-      }
-      await interaction.editReply({ content: '✅ تم تغيير الاسم.', components: [] });
+    private createSetupEmbed(): EmbedBuilder {
+        const settings = this.client.settings.ticket;
+        const locale = this.client.locales.get(this.client.settings.defaultLanguage)?.ticket;
+
+        const embed = new EmbedBuilder()
+            .setTitle(locale?.embeds?.setup?.title || 'Ticket System')
+            .setDescription(locale?.embeds?.setup?.description || 'Click below to create a ticket')
+            .setColor(settings.embed.color as `#${string}`)
+            .setTimestamp();
+
+        if (settings.embed.thumbnail) {
+            const thumbnail = settings.embed.thumbnail === '' ? null : settings.embed.thumbnail;
+            embed.setThumbnail(thumbnail);
+        }
+
+        if (settings.embed.image) {
+            const image = settings.embed.image === '' ? null : settings.embed.image;
+            embed.setImage(image);
+        }
+
+        if (settings.embed.footer) {
+            const footerIcon = settings.embed.footerIcon === '' ? null : settings.embed.footerIcon;
+            
+            embed.setFooter({
+                text: settings.embed.footer,
+                iconURL: footerIcon
+            });
+        }
+
+        return embed;
     }
 
-    if (action === 'add') {
-      await interaction.editReply({ content: '👤 اذكر المستخدم في الشات (mention)', components: [] });
-      const msgs = await channel.awaitMessages({ filter: m => m.author.id === interaction.user.id, max: 1, time: 30_000 });
-      const user = msgs.first()?.mentions.users.first();
-      if (user) {
-        await channel.permissionOverwrites.edit(user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
-        await channel.send({ embeds: [new EmbedBuilder().setColor(Colors.Green).setDescription(`➕ تمت إضافة ${user}`)] });
-      }
-      await msgs.first()?.delete().catch(() => null);
+    private createTicketComponents(): ActionRowBuilder<ButtonBuilder>[] {
+        const settings = this.client.settings.ticket;
+
+        const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+        let currentRow = new ActionRowBuilder<ButtonBuilder>();
+        let buttonCount = 0;
+        const rowLimit = 5; // Maximum buttons per row
+
+        settings.sections
+            .filter((section: TicketSection) => section.enabled)
+            .forEach((section: TicketSection) => {
+                if (buttonCount >= rowLimit) {
+                    rows.push(currentRow);
+                    currentRow = new ActionRowBuilder<ButtonBuilder>();
+                    buttonCount = 0;
+                }
+
+                currentRow.addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`ticket_create_${section.name.toLowerCase().replace(/\s+/g, '_')}`)
+                        .setLabel(section.name)
+                        .setEmoji(section.emoji)
+                        .setStyle(ButtonStyle.Primary)
+                );
+
+                buttonCount++;
+            });
+
+        if (buttonCount > 0) {
+            rows.push(currentRow);
+        }
+
+        return rows;
     }
 
-    if (action === 'remove') {
-      await interaction.editReply({ content: '👤 اذكر المستخدم في الشات (mention)', components: [] });
-      const msgs = await channel.awaitMessages({ filter: m => m.author.id === interaction.user.id, max: 1, time: 30_000 });
-      const user = msgs.first()?.mentions.users.first();
-      if (user && user.id !== ticket.ownerId) {
-        await channel.permissionOverwrites.delete(user.id).catch(() => null);
-        await channel.send({ embeds: [new EmbedBuilder().setColor(Colors.Red).setDescription(`➖ تمت إزالة ${user}`)] });
-      }
-      await msgs.first()?.delete().catch(() => null);
+    public async handleInteraction(interaction: ButtonInteraction | StringSelectMenuInteraction): Promise<void> {
+        const locale = this.client.locales.get(this.client.settings.defaultLanguage)?.ticket;
+        
+        try {
+            const settings = this.client.settings.ticket;
+
+            if (!interaction.isButton()) {
+                return;
+            }
+
+            const sectionName = interaction.customId.replace('ticket_create_', '');
+
+            const section = settings.sections.find((s: TicketSection) => 
+                s.name.toLowerCase().replace(/\s+/g, '_') === sectionName
+            );
+
+            if (!section || !section.enabled) {
+                await interaction.reply({
+                    content: locale?.messages?.invalidSection || '❌ Invalid ticket section',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Check required server membership
+            const requiredServer = settings.requiredServer;
+            if (requiredServer?.enabled && requiredServer?.guildId) {
+                const msg = requiredServer.message || '❌ يجب عليك الانضمام إلى سيرفرنا أولاً حتى تتمكن من فتح تذكرة!';
+                const inviteUrl = requiredServer.inviteUrl || '';
+                const replyMsg = inviteUrl ? `${msg}\n\n🔗 **رابط السيرفر:** ${inviteUrl}` : msg;
+
+                try {
+                    const requiredGuild = await this.client.guilds.fetch(requiredServer.guildId);
+                    await requiredGuild.members.fetch({ user: interaction.user.id, force: true });
+                    // If fetch succeeded, user is a member — allow ticket
+                } catch {
+                    // User is not a member OR bot is not in required guild — block either way
+                    await interaction.reply({ content: replyMsg, ephemeral: true });
+                    return;
+                }
+            }
+
+            const existingTickets = await Ticket.find({
+                guildId: interaction.guildId,
+                userId: interaction.user.id,
+                status: { $in: ['open', 'claimed'] }
+            });
+
+            // Close any tickets whose channel was manually deleted
+            for (const t of existingTickets) {
+                const ch = interaction.guild?.channels.cache.get(t.channelId) || 
+                           await interaction.guild?.channels.fetch(t.channelId).catch(() => null);
+                if (!ch) {
+                    t.status = 'closed';
+                    t.closedBy = 'system';
+                    t.closedAt = new Date();
+                    await t.save();
+                }
+            }
+
+            const activeTickets = existingTickets.filter(t => t.status !== 'closed');
+            if (activeTickets.length > 0) {
+                await interaction.reply({
+                    content: locale?.messages?.existingTicket || '❌ You already have an open ticket',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const category = await interaction.guild?.channels.fetch(section.categoryId);
+            if (!category || category.type !== ChannelType.GuildCategory) {
+                throw new Error('Invalid category');
+            }
+
+            const channelName = `ticket-${interaction.user.username.toLowerCase()}`;
+            const ticketChannel = await interaction.guild?.channels.create({
+                name: channelName,
+                type: ChannelType.GuildText,
+                parent: category.id,
+                permissionOverwrites: [
+                    {
+                        id: interaction.guild.id,
+                        deny: ['ViewChannel']
+                    },
+                    {
+                        id: interaction.user.id,
+                        allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory']
+                    },
+                    {
+                        id: this.client.user!.id,
+                        allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'ManageChannels']
+                    },
+                    ...section.adminRoles.map((roleId: string) => ({
+                        id: roleId,
+                        allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory']
+                    }))
+                ]
+            });
+
+            if (!ticketChannel) {
+                throw new Error('Failed to create ticket channel');
+            }
+
+            const ticket = await Ticket.create({
+                guildId: interaction.guildId,
+                channelId: ticketChannel.id,
+                userId: interaction.user.id,
+                section: section.name,
+                status: 'open'
+            });
+
+            const embed = this.createTicketEmbed(ticket, interaction.member as GuildMember);
+
+            const buttons = new ActionRowBuilder<ButtonBuilder>()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`ticket_claim_${ticket.id}`)
+                        .setLabel(locale?.buttons?.claim || 'Claim')
+                        .setStyle(ButtonStyle.Primary)
+                        .setEmoji('👋'),
+                    new ButtonBuilder()
+                        .setCustomId(`ticket_close_${ticket.id}`)
+                        .setLabel(locale?.buttons?.close || 'Close')
+                        .setStyle(ButtonStyle.Danger)
+                        .setEmoji('🔒')
+                );
+
+            await ticketChannel.send({
+                content: `<@${interaction.user.id}> ${locale?.messages?.welcome || 'Welcome to your ticket!'}`,
+                embeds: [embed],
+                components: [buttons]
+            });
+
+            await interaction.reply({
+                content: locale?.messages?.created?.replace('{channel}', `<#${ticketChannel.id}>`) || 
+                         `✅ Ticket created: <#${ticketChannel.id}>`,
+                ephemeral: true
+            });
+
+        } catch (error) {
+            console.error('Error creating ticket:', error);
+            await interaction.reply({
+                content: locale?.messages?.error?.create || '❌ An error occurred while creating your ticket.',
+                ephemeral: true
+            });
+        }
     }
 
-    if (action === 'reset') {
-      const ctrlRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId('tkt_close').setLabel('اغلاق').setEmoji('🔒').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('tkt_claim').setLabel('استلام').setEmoji('✋').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('tkt_owner').setLabel('استدعاء الأونر').setEmoji('🔇').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('tkt_support').setLabel('طلب السبورت').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
-      );
-      const ctrlRow2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId('tkt_edit').setLabel('تعديل التذكرة').setEmoji('⚙️').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('tkt_transcript').setLabel('Transcript').setEmoji('📄').setStyle(ButtonStyle.Secondary),
-      );
-      await channel.send({ embeds: [new EmbedBuilder().setColor('#5865F2').setDescription('🔄 تم إعادة تعيين الأزرار')], components: [ctrlRow, ctrlRow2] });
-      await interaction.editReply({ content: '✅ تم.', components: [] });
-    }
-  });
-}
+    private createTicketEmbed(ticket: TicketData, member: GuildMember): EmbedBuilder {
+        const settings = this.client.settings.ticket;
+        const locale = this.client.locales.get(this.client.settings.defaultLanguage)?.ticket;
+        const section = settings.sections.find((s: TicketSection) => s.name === ticket.section);
 
-// ── Transcript
-export async function handleTranscript(interaction: ButtonInteraction): Promise<void> {
-  await interaction.deferReply({ ephemeral: true });
-  const ticket = await Ticket.findOne({ channelId: interaction.channel!.id });
-  if (!ticket) { await interaction.editReply({ content: '❌ ليست تذكرة.' }); return; }
-  const buf = await generateTranscript(interaction.channel as TextChannel, ticket.ownerTag, ticket.sectionName).catch(() => null);
-  if (!buf) { await interaction.editReply({ content: '❌ فشل إنشاء الـ Transcript.' }); return; }
-  await interaction.editReply({ content: '✅ Transcript:', files: [new AttachmentBuilder(buf, { name: `transcript-${(interaction.channel as TextChannel).name}.html` })] });
-}
+        const embed = new EmbedBuilder()
+            .setColor(settings.embed.color as `#${string}`)
+            .setAuthor({
+                name: member.user.tag,
+                iconURL: member.user.displayAvatarURL()
+            })
+            .addFields([
+                {
+                    name: locale?.embeds?.ticket?.user || '👤 User',
+                    value: `<@${member.id}>`,
+                    inline: true
+                },
+                {
+                    name: locale?.embeds?.ticket?.created || '📅 Created',
+                    value: `<t:${Math.floor(Date.now() / 1000)}:R>`,
+                    inline: true
+                },
+                {
+                    name: locale?.embeds?.ticket?.section || '🏷️ Section',
+                    value: `${section?.emoji} ${section?.name}`,
+                    inline: true
+                }
+            ])
+            .setTimestamp();
+
+        if (section.imageUrl) {
+            const imageUrl = section.imageUrl === '' ? null : section.imageUrl;
+            embed.setImage(imageUrl);
+        }
+
+        if (settings.embed.thumbnail) {
+            const thumbnail = settings.embed.thumbnail === '' ? null : settings.embed.thumbnail;
+            embed.setThumbnail(thumbnail);
+        }
+
+        if (settings.embed.footer) {
+            const footerIcon = settings.embed.footerIcon === '' ? null : settings.embed.footerIcon;
+            
+            embed.setFooter({
+                text: settings.embed.footer,
+                iconURL: footerIcon
+            });
+        }
+
+        return embed;
+    }
+
+    public async handleClaim(interaction: ButtonInteraction): Promise<void> {
+        try {
+            const ticketId = interaction.customId.replace('ticket_claim_', '');
+            const ticket = await Ticket.findById(ticketId);
+            const locale = this.client.locales.get(this.client.settings.defaultLanguage)?.ticket;
+
+            if (!ticket || ticket.status !== 'open') {
+                await interaction.reply({
+                    content: locale?.messages?.invalidTicket || '❌ Invalid ticket',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const section = this.client.settings.ticket.sections.find(
+                (s: TicketSection) => s.name === ticket.section
+            );
+
+            if (!section) {
+                await interaction.reply({
+                    content: locale?.messages?.invalidSection || '❌ Invalid ticket section',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const member = interaction.member as GuildMember;
+            const hasPermission = section.adminRoles.some((roleId: string) => member.roles.cache.has(roleId));
+
+            if (!hasPermission) {
+                await interaction.reply({
+                    content: locale?.messages?.noPermission || '❌ You do not have permission to claim this ticket',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            ticket.status = 'claimed';
+            ticket.claimedBy = interaction.user.id;
+            ticket.claimedAt = new Date();
+            await ticket.save();
+
+            const embed = this.createTicketEmbed(ticket, member);
+
+            const closeButton = new ActionRowBuilder<ButtonBuilder>()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`ticket_close_${ticket.id}`)
+                        .setLabel(locale?.buttons?.close || 'Close')
+                        .setStyle(ButtonStyle.Danger)
+                        .setEmoji('🔒')
+                );
+
+            await interaction.message.edit({
+                embeds: [embed],
+                components: [closeButton]
+            });
+
+            await interaction.reply({
+                content: locale?.messages?.claimed?.replace('{user}', `<@${interaction.user.id}>`) || 
+                         `✅ Ticket claimed by <@${interaction.user.id}>`,
+            });
+
+        } catch (error) {
+            console.error('Error claiming ticket:', error);
+            await interaction.reply({
+                content: '❌ An error occurred while claiming the ticket.',
+                ephemeral: true
+            });
+        }
+    }
+
+    public async handleClose(interaction: ButtonInteraction): Promise<void> {
+        try {
+            const ticketId = interaction.customId.replace('ticket_close_', '');
+            const ticket = await Ticket.findById(ticketId);
+            const locale = this.client.locales.get(this.client.settings.defaultLanguage)?.ticket;
+
+            if (!ticket || ticket.status === 'closed') {
+                await interaction.reply({
+                    content: locale?.messages?.invalidTicket || '❌ Invalid ticket',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const section = this.client.settings.ticket.sections.find(
+                (s: TicketSection) => s.name === ticket.section
+            );
+
+            if (!section) {
+                await interaction.reply({
+                    content: locale?.messages?.invalidSection || '❌ Invalid ticket section',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const member = interaction.member as GuildMember;
+            const hasPermission = section.adminRoles.some((roleId: string) => member.roles.cache.has(roleId)) || 
+                                ticket.userId === member.id;
+
+            if (!hasPermission) {
+                await interaction.reply({
+                    content: locale?.messages?.noPermission || '❌ You do not have permission to close this ticket',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            const channel = await interaction.guild?.channels.fetch(ticket.channelId) as TextChannel;
+            if (!channel) {
+                throw new Error('Ticket channel not found');
+            }
+
+            await interaction.deferReply();
+
+            const transcript = await createTranscript(channel);
+            const logChannel = await interaction.guild?.channels.fetch(section.logChannelId) as TextChannel;
+
+            if (logChannel) {
+                const logEmbed = new EmbedBuilder()
+                    .setTitle(locale?.embeds?.log?.title || 'Ticket Closed')
+                    .setColor(this.client.settings.ticket.embed.color as `#${string}`)
+                    .addFields([
+                        {
+                            name: locale?.embeds?.log?.ticket || 'Ticket',
+                            value: `#${channel.name}`,
+                            inline: true
+                        },
+                        {
+                            name: locale?.embeds?.log?.user || 'User',
+                            value: `<@${ticket.userId}>`,
+                            inline: true
+                        },
+                        {
+                            name: locale?.embeds?.log?.section || 'Section',
+                            value: section.name,
+                            inline: true
+                        },
+                        {
+                            name: locale?.embeds?.log?.closedBy || 'Closed By',
+                            value: `<@${interaction.user.id}>`,
+                            inline: true
+                        },
+                        {
+                            name: locale?.embeds?.log?.createdAt || 'Created At',
+                            value: `<t:${Math.floor(ticket.createdAt.getTime() / 1000)}:F>`,
+                            inline: true
+                        },
+                        {
+                            name: locale?.embeds?.log?.closedAt || 'Closed At',
+                            value: `<t:${Math.floor(Date.now() / 1000)}:F>`,
+                            inline: true
+                        }
+                    ]);
+
+                if (ticket.claimedBy) {
+                    logEmbed.addFields({
+                        name: locale?.embeds?.log?.claimedBy || 'Claimed By',
+                        value: `<@${ticket.claimedBy}>`,
+                        inline: true
+                    });
+                }
+
+                await logChannel.send({
+                    embeds: [logEmbed],
+                    files: [transcript]
+                });
+            }
+
+            ticket.status = 'closed';
+            ticket.closedBy = interaction.user.id;
+            ticket.closedAt = new Date();
+            await ticket.save();
+
+            const closeEmbed = new EmbedBuilder()
+                .setDescription(locale?.messages?.closing || '🔒 This ticket will be closed in 5 seconds...')
+                .setColor(this.client.settings.ticket.embed.color as `#${string}`);
+
+            await interaction.editReply({
+                embeds: [closeEmbed]
+            });
+
+            setTimeout(async () => {
+                try {
+                    await channel.delete();
+                } catch (error) {
+                    console.error('Error deleting ticket channel:', error);
+                }
+            }, 5000);
+
+        } catch (error) {
+            console.error('Error closing ticket:', error);
+            await interaction.reply({
+                content: '❌ An error occurred while closing the ticket.',
+                ephemeral: true
+            }).catch(() => null);
+        }
+    }
+} 

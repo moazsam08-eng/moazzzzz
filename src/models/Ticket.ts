@@ -1,33 +1,31 @@
-import { Schema, model, Document } from 'mongoose';
+import mongoose from 'mongoose';
 
-export interface ITicket extends Document {
-  guildId:    string;
-  channelId:  string;
-  ownerId:    string;
-  ownerTag:   string;
-  sectionName:string;
-  reason?:    string;
-  status:     'open' | 'closed';
-  claimedBy?: string;
-  closedBy?:  string;
-  closedAt?:  Date;
-  createdAt:  Date;
-  number:     number;
+export interface ITicket extends mongoose.Document {
+    guildId: string;
+    channelId: string;
+    userId: string;
+    section: string;
+    status: 'open' | 'claimed' | 'closed';
+    claimedBy?: string;
+    closedBy?: string;
+    createdAt: Date;
+    claimedAt?: Date;
+    closedAt?: Date;
+    transcriptUrl?: string;
 }
 
-const TicketSchema = new Schema<ITicket>({
-  guildId:    { type: String, required: true, index: true },
-  channelId:  { type: String, required: true, unique: true },
-  ownerId:    { type: String, required: true },
-  ownerTag:   { type: String, required: true },
-  sectionName:{ type: String, required: true },
-  reason:     { type: String },
-  status:     { type: String, enum: ['open','closed'], default: 'open' },
-  claimedBy:  { type: String },
-  closedBy:   { type: String },
-  closedAt:   { type: Date },
-  createdAt:  { type: Date, default: Date.now },
-  number:     { type: Number, required: true },
+const ticketSchema = new mongoose.Schema({
+    guildId: { type: String, required: true },
+    channelId: { type: String, required: true },
+    userId: { type: String, required: true },
+    section: { type: String, required: true },
+    status: { type: String, enum: ['open', 'claimed', 'closed'], default: 'open' },
+    claimedBy: { type: String },
+    closedBy: { type: String },
+    createdAt: { type: Date, default: Date.now },
+    claimedAt: { type: Date },
+    closedAt: { type: Date },
+    transcriptUrl: { type: String }
 });
 
-export const Ticket = model<ITicket>('Ticket', TicketSchema);
+export const Ticket = mongoose.models.Ticket || mongoose.model<ITicket>('Ticket', ticketSchema); 
